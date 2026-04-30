@@ -1,0 +1,45 @@
+### model
+model_name_or_path: Qwen/Qwen3-1.7B
+# Load SFT adapter as starting point for DPO
+adapter_name_or_path: project/policy_outputs/sft_model
+trust_remote_code: true
+
+### method
+stage: dpo
+do_train: true
+finetuning_type: lora
+lora_target: all
+pref_beta: 0.1
+
+### dataset
+# pheme_hint_dpo must be registered in data/dataset_info.json
+# and the file data/pheme_hint_dpo.json must exist
+# (copy project/policy_data/dpo/train.json -> data/pheme_hint_dpo.json before training)
+dataset: pheme_hint_dpo
+template: qwen3
+cutoff_len: 1024
+max_samples: 100000
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### output
+output_dir: project/policy_outputs/dpo_model
+logging_steps: 10
+save_steps: 200
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 32
+learning_rate: 5.0e-6
+num_train_epochs: 1
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+
+### eval
+val_size: 0.1
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 100

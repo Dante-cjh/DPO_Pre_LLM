@@ -1,0 +1,46 @@
+### model
+model_name_or_path: Qwen/Qwen3-1.7B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+
+### dataset
+# pheme_hint_sft must be registered in data/dataset_info.json
+# and the file data/pheme_hint_sft.json must exist
+# (copy project/policy_data/sft/train.json -> data/pheme_hint_sft.json before training)
+dataset: pheme_hint_sft
+template: qwen3
+cutoff_len: 1024
+max_samples: 100000
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### output
+# Paths are relative to the LLaMA-Factory root directory
+output_dir: project/policy_outputs/sft_model
+logging_steps: 10
+save_steps: 200
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-5
+num_train_epochs: 2
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+
+### eval
+val_size: 0.1
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 100

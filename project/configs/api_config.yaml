@@ -1,0 +1,28 @@
+api:
+  # DO NOT put your real key here — this file is committed to git.
+  # Set the environment variable DASHSCOPE_API_KEY instead:
+  #   export DASHSCOPE_API_KEY="sk-..."
+  # or create a .env file with: DASHSCOPE_API_KEY=sk-...
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-turbo"   # options: qwen-turbo / qwen3-turbo / qwen-plus / qwen-max
+  temperature: 0
+  max_retries: 3
+  retry_delay: 5
+
+policy:
+  base_model: "Qwen/Qwen3-1.7B"   # local path or HuggingFace model ID
+  max_new_tokens: 200
+  temperature: 0.0
+  fallback_hint: "Focus on the central claim, supporting and refuting replies, conflict among replies, source grounding, and whether the discussion provides concrete evidence or only emotional reactions."
+
+slm:
+  model_name: "microsoft/deberta-v3-base"
+  max_length: 512
+  batch_size: 16
+  num_epochs: 5
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  seed: 42
+  metric_for_best_model: "macro_f1"

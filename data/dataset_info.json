@@ -730,5 +730,25 @@
       "prompt": "content"
     },
     "folder": "python"
+  },
+  "pheme_hint_sft": {
+    "file_name": "pheme_hint_sft.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "pheme_hint_dpo": {
+    "file_name": "pheme_hint_dpo.json",
+    "formatting": "alpaca",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
   }
 }
