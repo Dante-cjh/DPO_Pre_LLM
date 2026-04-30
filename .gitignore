@@ -183,3 +183,7 @@ predictions_score.json
 
 .cursor/
 .claude/
+
+project/data/
+project/basepack/
+project/policy_data/
