@@ -1,23 +1,8 @@
 name: tests_npu
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - "main"
-    paths:
-      - "**/*.py"
-      - "requirements.txt"
-      - "Makefile"
-      - ".github/workflows/*.yml"
-  pull_request:
-    branches:
-      - "main"
-    paths:
-      - "**/*.py"
-      - "requirements.txt"
-      - "Makefile"
-      - ".github/workflows/*.yml"
+  workflow_dispatch:  # auto-triggers disabled
+
 
 jobs:
   tests:

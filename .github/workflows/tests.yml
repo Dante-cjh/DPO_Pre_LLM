@@ -1,23 +1,8 @@
 name: tests
 
+# Auto-triggers disabled — research fork, run manually if needed via Actions tab
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "main"
-    paths:
-      - "**/*.py"
-      - "requirements.txt"
-      - "Makefile"
-      - ".github/workflows/*.yml"
-  pull_request:
-    branches:
-      - "main"
-    paths:
-      - "**/*.py"
-      - "requirements.txt"
-      - "Makefile"
-      - ".github/workflows/*.yml"
 
 jobs:
   tests:

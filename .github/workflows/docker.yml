@@ -1,26 +1,8 @@
 name: docker
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - "main"
-    paths:
-      - "**/*.py"
-      - "requirements.txt"
-      - "docker/**"
-      - ".github/workflows/*.yml"
-  pull_request:
-    branches:
-      - "main"
-    paths:
-      - "**/*.py"
-      - "requirements.txt"
-      - "docker/**"
-      - ".github/workflows/*.yml"
-  release:
-    types:
-      - published
+  workflow_dispatch:  # auto-triggers disabled
+
 
 jobs:
   build:
