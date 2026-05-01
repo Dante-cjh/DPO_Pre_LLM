@@ -12,6 +12,7 @@ Writes to slm_outputs/{method}/:
 
 Usage:
   python scripts/09_train_slm.py --method basepack_only
+  python scripts/09_train_slm.py --method basepack_only --force
   python scripts/09_train_slm.py --method heuristic_pre
   python scripts/09_train_slm.py \
       --train slm_data/custom/train.jsonl \
@@ -25,6 +26,10 @@ import argparse
 import os
 from pathlib import Path
 
+# RTX 4000 系列不支持 P2P/IB 通信，训练前显式禁用
+os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+os.environ.setdefault("NCCL_IB_DISABLE", "1")
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -36,6 +41,22 @@ from transformers import (
     EarlyStoppingCallback,
 )
 from sklearn.metrics import accuracy_score, f1_score
+
+
+def slm_outputs_complete(output_dir: Path) -> bool:
+    """
+    判断该 output_dir 是否已有完整训练产物（metrics、测试预测、best_model 权重）。
+    用于再次跑 pipeline 时跳过已完成的 SLM 训练。
+    """
+    output_dir = Path(output_dir)
+    metrics_path = output_dir / "metrics.json"
+    preds_path = output_dir / "test_predictions.jsonl"
+    best = output_dir / "best_model"
+    if not metrics_path.is_file() or not preds_path.is_file() or not best.is_dir():
+        return False
+    has_weights = (best / "model.safetensors").is_file() or (best / "pytorch_model.bin").is_file()
+    has_config = (best / "config.json").is_file()
+    return bool(has_weights and has_config)
 
 
 class TextDataset(Dataset):
@@ -208,6 +229,11 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="即使 slm_outputs 下已有完整输出也重新训练",
+    )
     args = parser.parse_args()
 
     if args.method:
@@ -218,6 +244,12 @@ def main():
 
     if not all([args.train, args.val, args.test, args.output_dir]):
         raise ValueError("Provide --method OR all of --train --val --test --output_dir")
+
+    out_path = Path(args.output_dir)
+    if not args.force and slm_outputs_complete(out_path):
+        print(f"跳过 SLM 训练（已有完整输出）: {out_path}")
+        print("  若要强制重训，请加参数: --force")
+        return
 
     train_slm(
         Path(args.train), Path(args.val), Path(args.test),

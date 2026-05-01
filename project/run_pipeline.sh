@@ -21,6 +21,77 @@
 set -euo pipefail
 LLAMAFACTORY_ROOT="$(dirname "$(pwd)")"
 
+# SLM 训练默认跳过已有完整产物的目录；强制全部重训: FORCE_TRAIN_SLM=1 bash run_pipeline.sh
+FORCE_TRAIN_SLM="${FORCE_TRAIN_SLM:-0}"
+if [ "${FORCE_TRAIN_SLM}" = "1" ]; then
+    _train_slm_extra="--force"
+else
+    _train_slm_extra=""
+fi
+
+# 若候选文件已完整生成（行数与 basepack 对齐），则跳过 Step 7；强制重跑: FORCE_CANDIDATES=1
+FORCE_CANDIDATES="${FORCE_CANDIDATES:-0}"
+FORCE_SFT_DATA="${FORCE_SFT_DATA:-0}"
+
+# GPU 策略：推理/数据构建默认单卡，SFT/DPO 训练使用双卡
+CUDA_SINGLE="${CUDA_SINGLE:-5}"
+CUDA_MULTI="${CUDA_MULTI:-4,5}"
+export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
+
+# RTX 40 系列 + 旧驱动环境下，禁用 NCCL P2P/IB 避免通信问题
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+
+is_complete_jsonl_for_split() {
+    local split="$1"
+    local basepack_path="${BASEPACK_V2_DIR}/basepack_${split}.jsonl"
+    local out_path="policy_data/dpo/candidate_hints_${split}.jsonl"
+
+    if [ ! -f "${basepack_path}" ] || [ ! -f "${out_path}" ]; then
+        return 1
+    fi
+
+    local base_n out_n
+    base_n=$(wc -l < "${basepack_path}")
+    out_n=$(wc -l < "${out_path}")
+    [ "${base_n}" -gt 0 ] && [ "${out_n}" -ge "${base_n}" ]
+}
+
+is_sft_split_complete() {
+    local split="$1"
+    local bp_path="${BASEPACK_V2_DIR}/basepack_${split}.jsonl"
+    local sft_path="policy_data/sft/${split}.json"
+
+    if [ ! -f "${bp_path}" ] || [ ! -f "${sft_path}" ]; then
+        return 1
+    fi
+
+    python - "${bp_path}" "${sft_path}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+bp_path = Path(sys.argv[1])
+sft_path = Path(sys.argv[2])
+
+def jsonl_count(path: Path) -> int:
+    with path.open("r", encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+def json_count(path: Path) -> int:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    return len(data) if isinstance(data, list) else -1
+
+try:
+    ok = jsonl_count(bp_path) > 0 and json_count(sft_path) == jsonl_count(bp_path)
+except Exception:
+    ok = False
+
+sys.exit(0 if ok else 1)
+PY
+}
+
 # ── configurable paths ─────────────────────────────────────────────────────────
 QWEN_1P7B="${QWEN_1P7B:-Qwen/Qwen3-1.7B}"
 QWEN_8B="${QWEN_8B:-Qwen/Qwen3-8B}"
@@ -60,7 +131,7 @@ echo "================================================================"
 echo " Step 3: Train G0 SLM (DeBERTa-v3-base, BasePack-only)"
 echo "         G0 checkpoint also serves as the frozen SLM probe"
 echo "================================================================"
-python scripts/09_train_slm.py --method basepack_only
+python scripts/09_train_slm.py --method basepack_only ${_train_slm_extra}
 
 G0_PROBE="slm_outputs/basepack_only/best_model"
 echo "  G0 SLM probe ready at: ${G0_PROBE}"
@@ -70,11 +141,21 @@ echo "================================================================"
 echo " Step 4: Build SFT policy training data"
 echo "         ~70% LLM-rewritten (Qwen3-8B) + 30% template"
 echo "================================================================"
-python scripts/02_make_sft_policy_data.py \
-    --basepack_dir "${BASEPACK_V2_DIR}" \
-    --output_dir policy_data/sft \
-    --llm_model "${QWEN_8B}" \
-    --template_ratio 0.3
+pending_sft_splits=()
+for split in train val; do
+    if [ "${FORCE_SFT_DATA}" != "1" ] && is_sft_split_complete "${split}"; then
+        echo "  Skip Step 4 (${split}): policy_data/sft/${split}.json already complete."
+    else
+        pending_sft_splits+=("${split}")
+    fi
+done
+
+if [ ${#pending_sft_splits[@]} -eq 0 ]; then
+    echo "  Skip Step 4: all requested splits are already complete."
+else
+    # 单行调用，避免续行符丢失导致「--template_ratio: command not found」
+    CUDA_VISIBLE_DEVICES="${CUDA_MULTI}" python scripts/02_make_sft_policy_data.py --basepack_dir "${BASEPACK_V2_DIR}" --output_dir policy_data/sft --llm_model "${QWEN_8B}" --template_ratio 0.3 --splits "${pending_sft_splits[@]}"
+fi
 
 echo ""
 echo " Step 4b: Copy SFT data to LLaMA-Factory data dir"
@@ -86,7 +167,7 @@ echo "================================================================"
 echo " Step 5: Train SFT policy (Qwen3-1.7B + LoRA)"
 echo "================================================================"
 cd "${LLAMAFACTORY_ROOT}"
-llamafactory-cli train project/llamafactory_configs/qwen3_1p7b_lora_sft.yaml
+CUDA_VISIBLE_DEVICES="${CUDA_MULTI}" llamafactory-cli train project/llamafactory_configs/qwen3_1p7b_lora_sft.yaml
 cd project
 
 echo ""
@@ -102,15 +183,16 @@ echo "================================================================"
 echo " Step 7: Generate 12 candidate hints per event"
 echo "         4 template + 6 LLM-rewritten (Qwen3-8B) + 2 SFT samples"
 echo "================================================================"
-python scripts/03_make_candidate_hints.py \
-    --split train \
-    --llm_model "${QWEN_8B}" \
-    --sft_base_model "${QWEN_1P7B}"
-
-python scripts/03_make_candidate_hints.py \
-    --split val \
-    --llm_model "${QWEN_8B}" \
-    --sft_base_model "${QWEN_1P7B}"
+for split in train val; do
+    if [ "${FORCE_CANDIDATES}" != "1" ] && is_complete_jsonl_for_split "${split}"; then
+        echo "  Skip Step 7 (${split}): policy_data/dpo/candidate_hints_${split}.jsonl already complete."
+    else
+        python scripts/03_make_candidate_hints.py \
+            --split "${split}" \
+            --llm_model "${QWEN_8B}" \
+            --sft_base_model "${QWEN_1P7B}"
+    fi
+done
 
 echo ""
 echo "================================================================"
@@ -147,7 +229,7 @@ echo "================================================================"
 echo " Step 10: Train DPO policy (Qwen3-1.7B + LoRA, SLM-aligned)"
 echo "================================================================"
 cd "${LLAMAFACTORY_ROOT}"
-llamafactory-cli train project/llamafactory_configs/qwen3_1p7b_lora_dpo.yaml
+CUDA_VISIBLE_DEVICES="${CUDA_MULTI}" llamafactory-cli train project/llamafactory_configs/qwen3_1p7b_lora_dpo.yaml
 cd project
 
 echo ""
@@ -193,9 +275,9 @@ echo ""
 echo "================================================================"
 echo " Step 14: Train SLM classifiers for G1/G2/G3"
 echo "================================================================"
-python scripts/09_train_slm.py --method heuristic_pre
-python scripts/09_train_slm.py --method sft_hint_pre
-python scripts/09_train_slm.py --method dpo_hint_pre
+python scripts/09_train_slm.py --method heuristic_pre ${_train_slm_extra}
+python scripts/09_train_slm.py --method sft_hint_pre ${_train_slm_extra}
+python scripts/09_train_slm.py --method dpo_hint_pre ${_train_slm_extra}
 
 echo ""
 echo "================================================================"

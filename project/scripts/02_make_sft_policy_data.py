@@ -192,8 +192,9 @@ def generate_llm_hint(tokenizer, model, system_prompt: str,
     return None
 
 
-def build_sft_sample(policy_input: str, hint_text: str) -> dict:
+def build_sft_sample(event_id: str, policy_input: str, hint_text: str) -> dict:
     return {
+        "event_id": event_id,
         "instruction": INSTRUCTION,
         "input": policy_input,
         "output": json.dumps({"focus_hint": hint_text}, ensure_ascii=False),
@@ -202,7 +203,7 @@ def build_sft_sample(policy_input: str, hint_text: str) -> dict:
 
 def process_split(input_path: Path, output_path: Path,
                   tokenizer, model, template_ratio: float = 0.3,
-                  deduplicate: bool = True):
+                  deduplicate: bool = True, resume: bool = True):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     events = []
@@ -214,18 +215,54 @@ def process_split(input_path: Path, output_path: Path,
     print(f"  Loaded {len(events)} events from {input_path}")
 
     samples = []
-    seen_hints: set = set()
+    existing_event_ids: set[str] = set()
+    existing_inputs: set[str] = set()
+    # resume 模式：读取已有样本并仅补齐缺失 event
+    if resume and output_path.exists():
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                samples = loaded
+                for item in loaded:
+                    if isinstance(item, dict):
+                        if isinstance(item.get("event_id"), str):
+                            existing_event_ids.add(item["event_id"])
+                        if isinstance(item.get("input"), str):
+                            existing_inputs.add(item["input"])
+                print(
+                    f"  Resume enabled: found {len(samples)} existing samples, "
+                    f"{len(existing_event_ids)} with event_id."
+                )
+        except Exception as e:
+            print(f"  [WARN] Failed to load existing {output_path}: {e}. Rebuilding this split.")
+            samples = []
+            existing_event_ids = set()
+            existing_inputs = set()
 
+    pending_events = []
     for i, event in enumerate(events, 1):
         policy_input = build_policy_input(event)
+        event_id = str(event.get("event_id", f"idx_{i-1}"))
+        if resume and (event_id in existing_event_ids or policy_input in existing_inputs):
+            continue
+        pending_events.append((event_id, policy_input, event))
+
+    print(f"  Pending generation: {len(pending_events)}/{len(events)}")
+
+    generated_count = 0
+    seen_hints: set = set()
+
+    for i, (event_id, policy_input, event) in enumerate(pending_events, 1):
 
         use_template = (tokenizer is None) or (random.random() < template_ratio)
 
         if use_template:
             hint = select_template_hint(event)
-            if hint not in seen_hints:
+            # 模板分支也必须保证每个 event 产出一条样本，不能因为全局去重而跳过
+            if deduplicate:
                 seen_hints.add(hint)
-                samples.append(build_sft_sample(policy_input, hint))
+            samples.append(build_sft_sample(event_id, policy_input, hint))
         else:
             system_key = random.choice(list(LLM_SYSTEM_PROMPTS.keys()))
             system_prompt = LLM_SYSTEM_PROMPTS[system_key]
@@ -234,15 +271,17 @@ def process_split(input_path: Path, output_path: Path,
                 hint = select_template_hint(event)
             if deduplicate:
                 seen_hints.add(hint)
-            samples.append(build_sft_sample(policy_input, hint))
+            samples.append(build_sft_sample(event_id, policy_input, hint))
+
+        generated_count += 1
 
         if i % 100 == 0:
-            print(f"    Progress: {i}/{len(events)}")
+            print(f"    Progress: {i}/{len(pending_events)}")
 
     with open(output_path, "w") as f:
         json.dump(samples, f, ensure_ascii=False, indent=2)
 
-    print(f"  -> {output_path}  ({len(samples)} samples)")
+    print(f"  -> {output_path}  ({len(samples)} samples, newly generated: {generated_count})")
 
 
 def main():
@@ -257,10 +296,20 @@ def main():
                         help="Fraction of samples using template hints (rest use LLM)")
     parser.add_argument("--no_llm", action="store_true",
                         help="Skip LLM; use only template hints (for quick testing)")
+    parser.add_argument("--cuda_devices", default=None,
+                        help='Restrict visible GPUs, e.g. "4,5".')
+    parser.add_argument("--no_resume", action="store_true",
+                        help="Disable resume mode and rebuild split from scratch")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     random.seed(args.seed)
+
+    if args.cuda_devices:
+        # 在加载模型前限制可见 GPU，避免 device_map=auto 均匀占满所有卡
+        import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_devices
+        print(f"CUDA_VISIBLE_DEVICES={args.cuda_devices}")
 
     tokenizer, model = None, None
     if not args.no_llm:
@@ -278,7 +327,7 @@ def main():
         output_path = output_dir / f"{split}.json"
         print(f"\nBuilding SFT data for {split}...")
         process_split(input_path, output_path, tokenizer, model,
-                      template_ratio=args.template_ratio)
+                      template_ratio=args.template_ratio, resume=not args.no_resume)
 
     print("\nSFT data build complete.")
 
