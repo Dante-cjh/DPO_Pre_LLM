@@ -187,3 +187,5 @@ predictions_score.json
 project/data/
 project/basepack/
 project/policy_data/
+project/basepack_v2/
+project/slm_data/
