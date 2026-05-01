@@ -37,6 +37,12 @@ num_train_epochs: 1
 lr_scheduler_type: cosine
 warmup_ratio: 0.05
 bf16: true
+# DPO holds policy + reference model simultaneously.
+# Enable gradient checkpointing to trade compute for memory (~30% less VRAM).
+gradient_checkpointing: true
+# Use the LoRA adapter as the frozen reference instead of a full model copy.
+# This halves reference model VRAM cost (only adapter diff is stored).
+ref_model: ~
 
 ### eval
 val_size: 0.1

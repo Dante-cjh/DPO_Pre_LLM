@@ -214,8 +214,19 @@ def generate_sft_sample(sft_tokenizer, sft_model, event: dict,
     return _parse_hint(generated) or FALLBACK_HINT
 
 
+def _release_model(model, tokenizer):
+    """Delete model from GPU memory and empty CUDA cache."""
+    import gc
+    del model, tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def process_split(basepack_path: Path, llm_tokenizer, llm_model,
-                  sft_tokenizer, sft_model, output_path: Path):
+                  sft_tokenizer, sft_model, output_path: Path,
+                  sft_base_model: str = "Qwen/Qwen3-1.7B",
+                  sft_adapter: str = "policy_outputs/sft_model"):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     events = []
@@ -237,6 +248,10 @@ def process_split(basepack_path: Path, llm_tokenizer, llm_model,
     to_process = [e for e in events if e["event_id"] not in resume_ids]
     print(f"Remaining: {len(to_process)}")
 
+    # ── Pass 1: Tier 1 (templates) + Tier 2 (LLM-rewritten) ──────────────────
+    # Build partial records keyed by event_id; Tier 3 filled in Pass 2.
+    partial: dict[str, dict] = {}
+
     with open(output_path, "a") as fout:
         for i, event in enumerate(to_process, 1):
             candidates = []
@@ -245,7 +260,7 @@ def process_split(basepack_path: Path, llm_tokenizer, llm_model,
             for hint_id, hint_text in TEMPLATE_CANDIDATES.items():
                 candidates.append({"hint_id": hint_id, "focus_hint": hint_text})
 
-            # Tier 2: LLM-rewritten candidates
+            # Tier 2: LLM-rewritten candidates (Qwen3-8B)
             if llm_model is not None:
                 for hint_id, system_prompt in LLM_SYSTEM_PROMPTS.items():
                     hint = generate_llm_hint(llm_tokenizer, llm_model, system_prompt, event)
@@ -254,16 +269,11 @@ def process_split(basepack_path: Path, llm_tokenizer, llm_model,
                 for hint_id in LLM_SYSTEM_PROMPTS:
                     candidates.append({"hint_id": hint_id, "focus_hint": FALLBACK_HINT})
 
-            # Tier 3: SFT policy samples (temperature=0.7)
-            if sft_model is not None:
-                for j in range(2):
-                    hint = generate_sft_sample(sft_tokenizer, sft_model, event)
-                    candidates.append({"hint_id": f"h_sft_{j}", "focus_hint": hint})
-            else:
-                for j in range(2):
-                    candidates.append({"hint_id": f"h_sft_{j}", "focus_hint": FALLBACK_HINT})
+            # Tier 3: placeholder — filled in Pass 2
+            for j in range(2):
+                candidates.append({"hint_id": f"h_sft_{j}", "focus_hint": FALLBACK_HINT})
 
-            record = {
+            partial[event["event_id"]] = {
                 "event_id": event["event_id"],
                 "label": event["label"],
                 "basepack_text": event["basepack_text"],
@@ -271,12 +281,41 @@ def process_split(basepack_path: Path, llm_tokenizer, llm_model,
                 "stats": event.get("stats", {}),
                 "stance_dist": event.get("stance_dist", {}),
                 "candidates": candidates,
+                "_event": event,
             }
-            fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-            fout.flush()
 
             if i % 50 == 0:
-                print(f"  Progress: {i}/{len(to_process)}")
+                print(f"  [Pass 1] Progress: {i}/{len(to_process)}")
+
+    # ── Release Qwen3-8B before loading SFT policy ───────────────────────────
+    if llm_model is not None:
+        print("Releasing Qwen3-8B from GPU memory...")
+        _release_model(llm_model, llm_tokenizer)
+        llm_model, llm_tokenizer = None, None
+
+    # ── Pass 2: Tier 3 (SFT policy samples at temperature=0.7) ───────────────
+    need_sft = sft_model is None and Path(sft_adapter).exists()
+    if need_sft:
+        print("Loading SFT policy for Tier 3 candidates...")
+        sft_tokenizer, sft_model = load_sft_policy(sft_base_model, sft_adapter)
+
+    if sft_model is not None:
+        for eid, rec in partial.items():
+            event = rec["_event"]
+            sft_hints = [generate_sft_sample(sft_tokenizer, sft_model, event) for _ in range(2)]
+            for j, hint in enumerate(sft_hints):
+                rec["candidates"][-(2 - j)]["focus_hint"] = hint
+
+        if need_sft:
+            print("Releasing SFT policy from GPU memory...")
+            _release_model(sft_model, sft_tokenizer)
+
+    # ── Write final records ───────────────────────────────────────────────────
+    with open(output_path, "a") as fout:
+        for rec in partial.values():
+            out = {k: v for k, v in rec.items() if k != "_event"}
+            fout.write(json.dumps(out, ensure_ascii=False) + "\n")
+        fout.flush()
 
     print(f"Done. Output: {output_path}")
 
