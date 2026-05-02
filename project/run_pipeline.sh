@@ -98,6 +98,59 @@ QWEN_8B="${QWEN_8B:-Qwen/Qwen3-8B}"
 BASEPACK_V2_DIR="basepack_v2"
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── vLLM 配置 ──────────────────────────────────────────────────────────────────
+# 用哪张卡跑 vLLM（单卡即可，4090 无 NVLink 不建议 tensor-parallel）
+VLLM_GPU="${VLLM_GPU:-5}"
+VLLM_PORT="${VLLM_PORT:-8000}"
+VLLM_BASE_URL="http://localhost:${VLLM_PORT}/v1"
+VLLM_MODEL_NAME="Qwen3-8B"          # vLLM served-model-name，供客户端调用
+VLLM_STARTUP_TIMEOUT=180            # 等待 vLLM 就绪的最长秒数
+VLLM_API_WORKERS="${VLLM_API_WORKERS:-50}"  # 并发请求数
+VLLM_PID=""                         # 由本脚本启动的 vLLM 进程 PID
+VLLM_STARTED_HERE=false             # 标记是否是本脚本启动的
+
+# 确保 vLLM 服务在运行；若未运行则自动启动
+ensure_vllm_running() {
+    if curl -sf "http://localhost:${VLLM_PORT}/health" > /dev/null 2>&1; then
+        echo "  [vLLM] 服务已在 port=${VLLM_PORT} 运行，直接复用。"
+        return 0
+    fi
+
+    echo "  [vLLM] 服务未运行，正在 GPU=${VLLM_GPU} 上启动..."
+    mkdir -p logs
+    CUDA_VISIBLE_DEVICES="${VLLM_GPU}" nohup vllm serve "${QWEN_8B}" \
+        --port "${VLLM_PORT}" \
+        --max-model-len 2048 \
+        --served-model-name "${VLLM_MODEL_NAME}" \
+        > logs/vllm.log 2>&1 &
+    VLLM_PID=$!
+    VLLM_STARTED_HERE=true
+    echo "  [vLLM] 进程已启动 (PID=${VLLM_PID})，等待 health check..."
+
+    local elapsed=0
+    until curl -sf "http://localhost:${VLLM_PORT}/health" > /dev/null 2>&1; do
+        sleep 5
+        elapsed=$((elapsed + 5))
+        if [ "${elapsed}" -ge "${VLLM_STARTUP_TIMEOUT}" ]; then
+            echo "[ERROR] vLLM 在 ${VLLM_STARTUP_TIMEOUT}s 内未能就绪，请检查 logs/vllm.log"
+            exit 1
+        fi
+    done
+    echo "  [vLLM] 服务就绪（等待了 ${elapsed}s）。"
+}
+
+# 若 vLLM 是本脚本启动的，则在不再需要时停止它以释放显存
+stop_vllm_if_we_started() {
+    if [ "${VLLM_STARTED_HERE}" = "true" ] && [ -n "${VLLM_PID}" ]; then
+        echo "  [vLLM] 停止本脚本启动的 vLLM 进程 (PID=${VLLM_PID})..."
+        kill "${VLLM_PID}" 2>/dev/null && wait "${VLLM_PID}" 2>/dev/null || true
+        VLLM_PID=""
+        VLLM_STARTED_HERE=false
+        echo "  [vLLM] 已停止，GPU 显存已释放。"
+    fi
+}
+# ──────────────────────────────────────────────────────────────────────────────
+
 echo "================================================================"
 echo " Step 0: Build BasePack-v1 (for G0/G1 reproducibility baseline)"
 echo "================================================================"
@@ -197,16 +250,27 @@ done
 echo ""
 echo "================================================================"
 echo " Step 8: Score candidates with SLM-aligned reward"
-echo "         Uses local Qwen3-8B + frozen G0 SLM probe"
+echo "         Uses vLLM Qwen3-8B (API) + frozen G0 SLM probe"
 echo "================================================================"
+ensure_vllm_running
+
+export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
 python scripts/04_score_candidate_hints.py \
     --split train \
-    --llm_model "${QWEN_8B}" \
+    --backend api \
+    --api_base_url "${VLLM_BASE_URL}" \
+    --api_model "${VLLM_MODEL_NAME}" \
+    --api_key EMPTY \
+    --api_workers "${VLLM_API_WORKERS}" \
     --slm_probe "${G0_PROBE}"
 
 python scripts/04_score_candidate_hints.py \
     --split val \
-    --llm_model "${QWEN_8B}" \
+    --backend api \
+    --api_base_url "${VLLM_BASE_URL}" \
+    --api_model "${VLLM_MODEL_NAME}" \
+    --api_key EMPTY \
+    --api_workers "${VLLM_API_WORKERS}" \
     --slm_probe "${G0_PROBE}"
 
 echo ""
@@ -243,25 +307,40 @@ python scripts/06_generate_policy_hints.py \
 echo ""
 echo "================================================================"
 echo " Step 12: Generate LLM_AUG for G1/G2/G3"
-echo "          All methods use local Qwen3-8B"
+echo "          All methods use vLLM Qwen3-8B (API, concurrent)"
+echo "          vLLM is (re-)started here if it was stopped after Step 8"
 echo "================================================================"
+ensure_vllm_running
+
+export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
 python scripts/07_run_qwen_turbo_aug.py \
     --method heuristic \
-    --backend local \
-    --llm_model "${QWEN_8B}" \
+    --backend api \
+    --api_base_url "${VLLM_BASE_URL}" \
+    --api_model "${VLLM_MODEL_NAME}" \
+    --api_key EMPTY \
+    --api_workers "${VLLM_API_WORKERS}" \
     --basepack_dir "${BASEPACK_V2_DIR}"
 
 python scripts/07_run_qwen_turbo_aug.py \
     --method sft_hint \
-    --backend local \
-    --llm_model "${QWEN_8B}" \
+    --backend api \
+    --api_base_url "${VLLM_BASE_URL}" \
+    --api_model "${VLLM_MODEL_NAME}" \
+    --api_key EMPTY \
+    --api_workers "${VLLM_API_WORKERS}" \
     --basepack_dir "${BASEPACK_V2_DIR}"
 
 python scripts/07_run_qwen_turbo_aug.py \
     --method dpo_hint \
-    --backend local \
-    --llm_model "${QWEN_8B}" \
+    --backend api \
+    --api_base_url "${VLLM_BASE_URL}" \
+    --api_model "${VLLM_MODEL_NAME}" \
+    --api_key EMPTY \
+    --api_workers "${VLLM_API_WORKERS}" \
     --basepack_dir "${BASEPACK_V2_DIR}"
+
+stop_vllm_if_we_started
 
 echo ""
 echo "================================================================"
