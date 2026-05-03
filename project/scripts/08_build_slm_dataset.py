@@ -123,13 +123,13 @@ def main():
     if args.method:
         aug_template = LLM_AUG_MAP.get(args.method)
         for split in args.splits:
-            basepack_path = Path(f"basepack/basepack_{split}.jsonl")
+            basepack_path = Path(f"basepack_v2/basepack_{split}.jsonl")
             if not basepack_path.exists():
                 print(f"[WARN] Not found: {basepack_path}, skipping.")
                 continue
             aug_path = Path(aug_template.replace("{split}", split)) if aug_template else None
             output_path = Path(f"slm_data/{args.method}/{split}.jsonl")
-            print(f"Building SLM data: method={args.method}, split={split}")
+            print(f"Building SLM data: method={args.method}, split={split} (basepack_v2)")
             build_split(basepack_path, aug_path, output_path, args.method)
     else:
         if not args.basepack or not args.output:

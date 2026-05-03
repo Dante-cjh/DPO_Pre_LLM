@@ -11,7 +11,7 @@
 #   - conda/venv with: transformers peft torch scikit-learn openai pyyaml python-dotenv
 #
 # Experiment groups produced:
-#   G0  BasePack-Only (also serves as frozen SLM probe for reward)
+#   G0  BasePack-Only
 #   G1  Heuristic Pre (reproduced on BasePack-v2)
 #   G2  SFT Hint Pre
 #   G3  DPO Hint Pre  [main result]
@@ -21,8 +21,8 @@
 set -euo pipefail
 LLAMAFACTORY_ROOT="$(dirname "$(pwd)")"
 
-# SLM 训练默认跳过已有完整产物的目录；强制全部重训: FORCE_TRAIN_SLM=1 bash run_pipeline.sh
-FORCE_TRAIN_SLM="${FORCE_TRAIN_SLM:-0}"
+# SLM 输入已统一到 basepack_v2；首次跑修复版默认强制重训。
+FORCE_TRAIN_SLM="${FORCE_TRAIN_SLM:-1}"
 if [ "${FORCE_TRAIN_SLM}" = "1" ]; then
     _train_slm_extra="--force"
 else
@@ -48,7 +48,7 @@ export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 is_policy_hints_complete() {
     local policy="$1"
     local split="$2"
-    local basepack_path="basepack/basepack_${split}.jsonl"
+    local basepack_path="basepack_v2/basepack_${split}.jsonl"
     local out_path="policy_outputs/${policy}_hints_${split}.jsonl"
 
     if [ ! -f "${basepack_path}" ] || [ ! -f "${out_path}" ]; then
@@ -175,11 +175,11 @@ done
 echo ""
 echo "================================================================"
 echo " Step 3: Train G0 SLM (DeBERTa-v3-base, BasePack-only)"
-echo "         G0 checkpoint also serves as the frozen SLM probe"
 echo "================================================================"
 python scripts/09_train_slm.py --method basepack_only ${_train_slm_extra}
 
 G0_PROBE="slm_outputs/basepack_only/best_model"
+REWARD_PROBE="slm_outputs/reward_probe/best_model"
 echo "  G0 SLM probe ready at: ${G0_PROBE}"
 
 echo ""
@@ -244,6 +244,15 @@ fi
 
 echo ""
 echo "================================================================"
+echo " Step 6.5: Build aug-aware SLM probe for DPO scoring (Fix-C)"
+echo "================================================================"
+bash scripts/0a_build_reward_probe.sh
+
+REWARD_PROBE="slm_outputs/reward_probe/best_model"
+echo "  reward probe ready at: ${REWARD_PROBE}"
+
+echo ""
+echo "================================================================"
 echo " Step 7: Generate 12 candidate hints per event"
 echo "         4 template + 6 LLM-rewritten (Qwen3-8B) + 2 SFT samples"
 echo "================================================================"
@@ -261,7 +270,7 @@ done
 echo ""
 echo "================================================================"
 echo " Step 8: Score candidates with SLM-aligned reward"
-echo "         Uses vLLM Qwen3-8B (API) + frozen G0 SLM probe"
+echo "         Uses vLLM Qwen3-8B (API) + aug-aware reward probe"
 echo "================================================================"
 export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
 python scripts/04_score_candidate_hints.py \
@@ -269,24 +278,26 @@ python scripts/04_score_candidate_hints.py \
     --backend api \
     --config "${VLLM_API_CONFIG_PATH}" \
     --api_workers "${VLLM_API_WORKERS}" \
-    --slm_probe "${G0_PROBE}"
+    --slm_probe "${REWARD_PROBE}"
 
 python scripts/04_score_candidate_hints.py \
     --split val \
     --backend api \
     --config "${VLLM_API_CONFIG_PATH}" \
     --api_workers "${VLLM_API_WORKERS}" \
-    --slm_probe "${G0_PROBE}"
+    --slm_probe "${REWARD_PROBE}"
 
 echo ""
 echo "================================================================"
-echo " Step 9: Build DPO pairs (min_margin=1.0, within-event norm)"
+echo " Step 9: Build DPO pairs (min_margin=0.5, top-2/bottom-2)"
 echo "================================================================"
 python scripts/05_make_dpo_pairs.py \
     --scored policy_data/dpo/scored_candidates_train.jsonl \
     --basepack "${BASEPACK_V2_DIR}/basepack_train.jsonl" \
     --output policy_data/dpo/train.json \
-    --min_margin 1.0
+    --min_margin 0.5 \
+    --top_k 2 \
+    --bottom_k 2
 
 echo ""
 echo " Step 9b: Copy DPO data to LLaMA-Factory data dir"
@@ -329,14 +340,7 @@ echo " Step 12: Generate LLM_AUG for G1/G2/G3"
 echo "          All methods use vLLM Qwen3-8B (API, concurrent)"
 echo "================================================================"
 export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
-python scripts/07_run_qwen_turbo_aug.py \
-    --method heuristic \
-    --backend api \
-    --api_base_url "${VLLM_BASE_URL}" \
-    --api_model "${VLLM_MODEL_NAME}" \
-    --api_key EMPTY \
-    --api_workers "${VLLM_API_WORKERS}" \
-    --basepack_dir "${BASEPACK_V2_DIR}"
+# heuristic LLM_AUG was already generated in Step 6.5.
 
 python scripts/07_run_qwen_turbo_aug.py \
     --method sft_hint \

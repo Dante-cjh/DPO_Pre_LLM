@@ -25,6 +25,8 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+from _policy_input import build_policy_input  # noqa: E402
+
 INSTRUCTION = (
     "Generate a concise focus_hint for LLM-assisted rumor analysis. "
     "Return only a JSON object with the key focus_hint."
@@ -111,29 +113,6 @@ def select_template_hint(event: dict) -> str:
     if len(source_text.split()) < 20 or len(entities) < 2:
         return TEMPLATE_HINTS["source_grounding_focus"]
     return TEMPLATE_HINTS["balanced_focus"]
-
-
-def build_policy_input(event: dict) -> str:
-    source_text = event.get("source_text", "")
-    replies = event.get("selected_replies", [])
-
-    lines = ["SOURCE:", source_text, "", "REPLIES:"]
-    for i, r in enumerate(replies, 1):
-        text = r["text"] if isinstance(r, dict) else r
-        lines.append(f"{i}. {text}")
-
-    stats = event.get("stats", {})
-    stance_dist = event.get("stance_dist", {})
-    lines.append("")
-    lines.append(
-        f"STATS:\nreply_count={stats.get('num_replies', 0)} | "
-        f"depth={stats.get('max_depth', 0)} | "
-        f"branches={stats.get('num_branches', 0)}"
-    )
-    if stance_dist:
-        dist_str = " | ".join(f"{s}={stance_dist.get(s, 0.0)}" for s in ["support", "deny", "query", "neutral"])
-        lines.append(f"STANCE_DIST: {dist_str}")
-    return "\n".join(lines)
 
 
 def load_llm(model_name: str):

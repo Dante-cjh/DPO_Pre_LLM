@@ -10,8 +10,8 @@ This script applies two stabilization steps before pairing:
        This removes the bias from events that are inherently harder (all rewards low).
 
   2. Pair selection:
-       chosen   = candidate with highest normalized reward
-       rejected = candidate with lowest normalized reward
+       chosen   = top-K candidates by normalized reward
+       rejected = bottom-K candidates by normalized reward
        Kept only if raw margin (before normalization) >= min_margin AND
        chosen must have llm_json_valid=1.
 
@@ -24,6 +24,8 @@ import math
 import argparse
 from pathlib import Path
 from collections import defaultdict
+
+from _policy_input import build_policy_input as build_policy_input_from_event
 
 INSTRUCTION = (
     "Generate a concise focus_hint for LLM-assisted rumor analysis. "
@@ -41,34 +43,9 @@ def normalize_within_event(records: list[dict]) -> list[dict]:
     return records
 
 
-def build_policy_input_from_event(record: dict) -> str:
-    source_text = record.get("source_text", "")
-    replies = record.get("selected_replies", [])
-    stats = record.get("stats", {})
-    stance_dist = record.get("stance_dist", {})
-
-    lines = ["SOURCE:", source_text, "", "REPLIES:"]
-    for i, r in enumerate(replies, 1):
-        text = r["text"] if isinstance(r, dict) else r
-        lines.append(f"{i}. {text[:150]}")
-
-    lines.append("")
-    lines.append(
-        f"STATS:\nreply_count={stats.get('num_replies', 0)} | "
-        f"depth={stats.get('max_depth', 0)} | "
-        f"branches={stats.get('num_branches', 0)}"
-    )
-    if stance_dist:
-        dist_str = " | ".join(
-            f"{s}={stance_dist.get(s, 0.0)}"
-            for s in ["support", "deny", "query", "neutral"]
-        )
-        lines.append(f"STANCE_DIST: {dist_str}")
-    return "\n".join(lines)
-
-
 def make_dpo_pairs(scored_path: Path, basepack_path: Path | None,
-                   output_path: Path, min_margin: float = 1.0):
+                   output_path: Path, min_margin: float = 0.5,
+                   top_k: int = 2, bottom_k: int = 2):
     basepack_lookup: dict[str, dict] = {}
     if basepack_path and basepack_path.exists():
         with open(basepack_path) as f:
@@ -91,28 +68,14 @@ def make_dpo_pairs(scored_path: Path, basepack_path: Path | None,
 
     for event_id, records in by_event.items():
         valid = [r for r in records if "reward" in r]
-        if len(valid) < 2:
+        if len(valid) < (top_k + bottom_k):
             skipped_too_few += 1
             continue
 
         valid = normalize_within_event(valid)
         sorted_recs = sorted(valid, key=lambda r: r["_norm_reward"], reverse=True)
-        chosen_rec = sorted_recs[0]
-        rejected_rec = sorted_recs[-1]
-
-        raw_margin = chosen_rec["reward"] - rejected_rec["reward"]
-        if raw_margin < min_margin:
-            skipped_no_margin += 1
-            continue
-
-        if not chosen_rec.get("llm_json_valid", 0):
-            skipped_invalid_chosen += 1
-            continue
-
-        chosen_hint = chosen_rec.get("focus_hint", "")
-        rejected_hint = rejected_rec.get("focus_hint", "")
-        if not chosen_hint or not rejected_hint:
-            continue
+        top_recs = sorted_recs[:top_k]
+        bot_recs = sorted_recs[-bottom_k:]
 
         bp_event = basepack_lookup.get(event_id, {})
         if bp_event:
@@ -120,22 +83,41 @@ def make_dpo_pairs(scored_path: Path, basepack_path: Path | None,
         else:
             policy_input = f"[Event: {event_id}]"
 
-        pairs.append({
-            "instruction": INSTRUCTION,
-            "input": policy_input,
-            "chosen": json.dumps({"focus_hint": chosen_hint}, ensure_ascii=False),
-            "rejected": json.dumps({"focus_hint": rejected_hint}, ensure_ascii=False),
-            "_meta": {
-                "event_id": event_id,
-                "chosen_hint_id": chosen_rec.get("hint_id"),
-                "rejected_hint_id": rejected_rec.get("hint_id"),
-                "chosen_reward": chosen_rec["reward"],
-                "rejected_reward": rejected_rec["reward"],
-                "raw_margin": round(raw_margin, 4),
-                "chosen_slm_gain": chosen_rec.get("slm_gain", 0.0),
-                "rejected_slm_gain": rejected_rec.get("slm_gain", 0.0),
-            },
-        })
+        for chosen_rec in top_recs:
+            if not chosen_rec.get("llm_json_valid", 0):
+                skipped_invalid_chosen += 1
+                continue
+            chosen_hint = chosen_rec.get("focus_hint", "")
+            if not chosen_hint:
+                continue
+
+            for rejected_rec in bot_recs:
+                if chosen_rec.get("hint_id") == rejected_rec.get("hint_id"):
+                    continue
+                rejected_hint = rejected_rec.get("focus_hint", "")
+                if not rejected_hint:
+                    continue
+                raw_margin = chosen_rec["reward"] - rejected_rec["reward"]
+                if raw_margin < min_margin:
+                    skipped_no_margin += 1
+                    continue
+
+                pairs.append({
+                    "instruction": INSTRUCTION,
+                    "input": policy_input,
+                    "chosen": json.dumps({"focus_hint": chosen_hint}, ensure_ascii=False),
+                    "rejected": json.dumps({"focus_hint": rejected_hint}, ensure_ascii=False),
+                    "_meta": {
+                        "event_id": event_id,
+                        "chosen_hint_id": chosen_rec.get("hint_id"),
+                        "rejected_hint_id": rejected_rec.get("hint_id"),
+                        "chosen_reward": chosen_rec["reward"],
+                        "rejected_reward": rejected_rec["reward"],
+                        "raw_margin": round(raw_margin, 4),
+                        "chosen_slm_gain": chosen_rec.get("slm_gain", 0.0),
+                        "rejected_slm_gain": rejected_rec.get("slm_gain", 0.0),
+                    },
+                })
 
     meta_path = output_path.with_suffix(".meta.jsonl")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,12 +153,17 @@ def main():
     parser.add_argument("--basepack", default="basepack_v2/basepack_train.jsonl",
                         help="BasePack-v2 file to reconstruct policy input text")
     parser.add_argument("--output", default="policy_data/dpo/train.json")
-    parser.add_argument("--min_margin", type=float, default=1.0,
-                        help="Minimum raw reward margin between chosen and rejected")
+    parser.add_argument("--min_margin", type=float, default=0.5,
+                        help="Minimum raw reward margin between chosen and rejected (default 0.5 after Fix-E)")
+    parser.add_argument("--top_k", type=int, default=2)
+    parser.add_argument("--bottom_k", type=int, default=2)
     args = parser.parse_args()
 
     basepack_path = Path(args.basepack) if args.basepack else None
-    make_dpo_pairs(Path(args.scored), basepack_path, Path(args.output), args.min_margin)
+    make_dpo_pairs(
+        Path(args.scored), basepack_path, Path(args.output),
+        min_margin=args.min_margin, top_k=args.top_k, bottom_k=args.bottom_k,
+    )
 
 
 if __name__ == "__main__":

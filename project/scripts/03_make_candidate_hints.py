@@ -27,6 +27,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
+from _policy_input import build_policy_input
+
 TEMPLATE_CANDIDATES = {
     "h_tmpl_heuristic": (
         "Focus on the central claim, supporting and refuting replies, conflict among replies, "
@@ -87,32 +89,6 @@ POLICY_INSTRUCTION = (
 FALLBACK_HINT = list(TEMPLATE_CANDIDATES.values())[0]
 
 JSON_RE = re.compile(r'\{[^{}]*"focus_hint"\s*:\s*"([^"]+)"[^{}]*\}', re.DOTALL)
-
-
-def build_policy_input(event: dict) -> str:
-    source_text = event.get("source_text", "")
-    replies = event.get("selected_replies", [])
-
-    lines = ["SOURCE:", source_text, "", "REPLIES:"]
-    for i, r in enumerate(replies, 1):
-        text = r["text"] if isinstance(r, dict) else r
-        lines.append(f"{i}. {text[:150]}")
-
-    stats = event.get("stats", {})
-    stance_dist = event.get("stance_dist", {})
-    lines.append("")
-    lines.append(
-        f"STATS:\nreply_count={stats.get('num_replies', 0)} | "
-        f"depth={stats.get('max_depth', 0)} | "
-        f"branches={stats.get('num_branches', 0)}"
-    )
-    if stance_dist:
-        dist_str = " | ".join(
-            f"{s}={stance_dist.get(s, 0.0)}"
-            for s in ["support", "deny", "query", "neutral"]
-        )
-        lines.append(f"STANCE_DIST: {dist_str}")
-    return "\n".join(lines)
 
 
 def load_llm_8b(model_name: str):

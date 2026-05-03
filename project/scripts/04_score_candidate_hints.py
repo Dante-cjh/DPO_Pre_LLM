@@ -305,22 +305,28 @@ def format_llm_aug(aug: dict) -> str:
     return "\n".join(lines)
 
 
+GATE_PENALTY = -10.0
+FIELD_COVERAGE_THRESHOLD = 0.5
+
+
 def compute_reward(slm_gain: float, aug: dict | None,
                    gold_label: int, out_tokens: int) -> float:
-    format_ok = 1.0 if aug is not None else 0.0
-    field_coverage = acc_llm = 0.0
-    if aug is not None:
-        non_empty = sum(1 for f in REQUIRED_FIELDS if aug.get(f) and str(aug[f]).strip())
-        field_coverage = non_empty / len(REQUIRED_FIELDS)
-        weak_label = str(aug.get("weak_label", "")).lower()
-        pred = {"true": 0, "fake": 1}.get(weak_label, -1)
-        acc_llm = 1.0 if pred == gold_label else 0.0
+    if aug is None:
+        return GATE_PENALTY
+
+    non_empty = sum(1 for f in REQUIRED_FIELDS if aug.get(f) and str(aug[f]).strip())
+    field_coverage = non_empty / len(REQUIRED_FIELDS)
+    if field_coverage < FIELD_COVERAGE_THRESHOLD:
+        return GATE_PENALTY
+
+    weak_label = str(aug.get("weak_label", "")).lower()
+    pred = {"true": 0, "fake": 1}.get(weak_label, -1)
+    acc_llm = 1.0 if pred == gold_label else 0.0
+
     cost_penalty = math.log(1 + out_tokens / 100)
     return (
-        1.5 * slm_gain
-        + 0.5 * acc_llm
-        + 0.3 * format_ok
-        + 0.2 * field_coverage
+        3.0 * slm_gain
+        + 0.2 * acc_llm
         - 0.1 * cost_penalty
     )
 
@@ -455,7 +461,7 @@ def main():
                         help="Local model path (backend=local)")
 
     # SLM probe (both backends)
-    parser.add_argument("--slm_probe", default="slm_outputs/basepack_only/best_model")
+    parser.add_argument("--slm_probe", default="slm_outputs/reward_probe/best_model")
 
     args = parser.parse_args()
 

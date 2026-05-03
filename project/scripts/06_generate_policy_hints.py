@@ -9,7 +9,7 @@ Usage:
   # Single file mode:
   python scripts/06_generate_policy_hints.py \
       --model_path policy_outputs/sft_model \
-      --input basepack/basepack_test.jsonl \
+      --input basepack_v2/basepack_test.jsonl \
       --output policy_outputs/sft_hints_test.jsonl
 
   # Policy mode (processes all splits):
@@ -25,6 +25,8 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+
+from _policy_input import build_policy_input
 
 FALLBACK_HINT = (
     "Focus on the central claim, supporting and refuting replies, conflict among replies, "
@@ -42,20 +44,6 @@ POLICY_PATHS = {
     "sft": "policy_outputs/sft_model",
     "dpo": "policy_outputs/dpo_model",
 }
-
-
-def build_policy_input(event: dict) -> str:
-    lines = ["SOURCE:", event.get("source_text", ""), "", "REPLIES:"]
-    for i, reply in enumerate(event.get("selected_replies", []), 1):
-        lines.append(f"{i}. {reply}")
-    stats = event.get("stats", {})
-    lines.append("")
-    lines.append(
-        f"STATS:\nreply_count={stats.get('num_replies', 0)} | "
-        f"depth={stats.get('max_depth', 0)} | "
-        f"branches={stats.get('num_branches', 0)}"
-    )
-    return "\n".join(lines)
 
 
 def load_model(base_model_path: str, adapter_path: str):
@@ -187,7 +175,7 @@ def main():
         adapter_path = POLICY_PATHS[args.policy]
         tokenizer, model = load_model(args.base_model, adapter_path)
         for split in args.splits:
-            basepack_path = Path(f"basepack/basepack_{split}.jsonl")
+            basepack_path = Path(f"basepack_v2/basepack_{split}.jsonl")
             output_path = Path(f"policy_outputs/{args.policy}_hints_{split}.jsonl")
             if not basepack_path.exists():
                 print(f"[WARN] Not found: {basepack_path}, skipping.")
