@@ -1,0 +1,86 @@
+{
+  "results": {
+    "basepack_only": {
+      "label": "BasePack only",
+      "metrics": {
+        "accuracy": 0.8605,
+        "macro_f1": 0.8494,
+        "f1_fake": 0.8085,
+        "f1_true": 0.8902,
+        "num_test": 258
+      },
+      "aug_stats": {}
+    },
+    "heuristic_pre": {
+      "label": "Heuristic Pre",
+      "metrics": {
+        "accuracy": 0.8798,
+        "macro_f1": 0.8681,
+        "f1_fake": 0.8287,
+        "f1_true": 0.9075,
+        "num_test": 258
+      },
+      "aug_stats": {
+        "json_parse_rate": 0.966,
+        "total_aug_calls": 1705,
+        "valid_aug_calls": 1647
+      }
+    },
+    "sft_hint_pre": {
+      "label": "SFT Hint Pre",
+      "metrics": {
+        "accuracy": 0.8992,
+        "macro_f1": 0.8922,
+        "f1_fake": 0.8646,
+        "f1_true": 0.9198,
+        "num_test": 258
+      },
+      "aug_stats": {
+        "json_parse_rate": 0.9859,
+        "total_aug_calls": 1705,
+        "valid_aug_calls": 1681
+      }
+    },
+    "dpo_hint_pre": {
+      "label": "DPO Hint Pre",
+      "metrics": {
+        "accuracy": 0.8837,
+        "macro_f1": 0.875,
+        "f1_fake": 0.8421,
+        "f1_true": 0.908,
+        "num_test": 258
+      },
+      "aug_stats": {
+        "json_parse_rate": 0.983,
+        "total_aug_calls": 1705,
+        "valid_aug_calls": 1676
+      }
+    }
+  },
+  "gains": [
+    {
+      "comparison": "Heuristic - BasePack",
+      "delta_acc": 1.93,
+      "delta_macro": 1.87,
+      "delta_f1fake": 2.02
+    },
+    {
+      "comparison": "SFT Hint - Heuristic",
+      "delta_acc": 1.94,
+      "delta_macro": 2.41,
+      "delta_f1fake": 3.59
+    },
+    {
+      "comparison": "DPO Hint - SFT Hint",
+      "delta_acc": -1.55,
+      "delta_macro": -1.72,
+      "delta_f1fake": -2.25
+    },
+    {
+      "comparison": "DPO Hint - Heuristic",
+      "delta_acc": 0.39,
+      "delta_macro": 0.69,
+      "delta_f1fake": 1.34
+    }
+  ]
+}

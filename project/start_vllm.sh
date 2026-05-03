@@ -1,8 +1,10 @@
-CUDA_VISIBLE_DEVICES=5 nohup vllm serve Qwen/Qwen3-8B \
-    --port 8000 \
-    --max-model-len 2048 \
-    --served-model-name Qwen3-8B \
-    > logs/vllm.log 2>&1 &
+CUDA_VISIBLE_DEVICES=2,3 vllm serve Qwen/Qwen3-8B \
+  --tensor-parallel-size 2 \
+  --max-model-len 2048 \
+  --max-num-seqs 64 \
+  --gpu-memory-utilization 0.80 \
+  --port 8000 \
+  --served-model-name Qwen3-8B
 
 echo "vLLM PID: $!"
 

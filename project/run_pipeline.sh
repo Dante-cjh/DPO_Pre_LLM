@@ -32,6 +32,7 @@ fi
 # 若候选文件已完整生成（行数与 basepack 对齐），则跳过 Step 7；强制重跑: FORCE_CANDIDATES=1
 FORCE_CANDIDATES="${FORCE_CANDIDATES:-0}"
 FORCE_SFT_DATA="${FORCE_SFT_DATA:-0}"
+FORCE_SFT_TRAIN="${FORCE_SFT_TRAIN:-0}"
 
 # GPU 策略：推理/数据构建默认单卡，SFT/DPO 训练使用双卡
 CUDA_SINGLE="${CUDA_SINGLE:-5}"
@@ -41,6 +42,24 @@ export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
 # RTX 40 系列 + 旧驱动环境下，禁用 NCCL P2P/IB 避免通信问题
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+
+# 检查 policy hints（sft 或 dpo）某个 split 是否已完整生成
+# 用法: is_policy_hints_complete sft train
+is_policy_hints_complete() {
+    local policy="$1"
+    local split="$2"
+    local basepack_path="basepack/basepack_${split}.jsonl"
+    local out_path="policy_outputs/${policy}_hints_${split}.jsonl"
+
+    if [ ! -f "${basepack_path}" ] || [ ! -f "${out_path}" ]; then
+        return 1
+    fi
+
+    local base_n out_n
+    base_n=$(wc -l < "${basepack_path}")
+    out_n=$(wc -l < "${out_path}")
+    [ "${base_n}" -gt 0 ] && [ "${out_n}" -ge "${base_n}" ]
+}
 
 is_complete_jsonl_for_split() {
     local split="$1"
@@ -92,6 +111,11 @@ sys.exit(0 if ok else 1)
 PY
 }
 
+is_sft_model_complete() {
+    local model_dir="policy_outputs/sft_model"
+    [ -f "${model_dir}/adapter_config.json" ] && [ -f "${model_dir}/adapter_model.safetensors" ]
+}
+
 # ── configurable paths ─────────────────────────────────────────────────────────
 QWEN_1P7B="${QWEN_1P7B:-Qwen/Qwen3-1.7B}"
 QWEN_8B="${QWEN_8B:-Qwen/Qwen3-8B}"
@@ -106,7 +130,19 @@ VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_BASE_URL="http://localhost:${VLLM_PORT}/v1"
 VLLM_MODEL_NAME="Qwen3-8B"
 VLLM_API_WORKERS="${VLLM_API_WORKERS:-50}"
+VLLM_API_CONFIG_PATH="configs/api_config_vllm.yaml"
 # ──────────────────────────────────────────────────────────────────────────────
+
+# 为使用 --config 的脚本生成 vLLM API 配置（如 04_score_candidate_hints.py）
+mkdir -p configs
+cat > "${VLLM_API_CONFIG_PATH}" <<EOF
+api:
+  api_key: "EMPTY"
+  base_url: "${VLLM_BASE_URL}"
+  model: "${VLLM_MODEL_NAME}"
+  max_retries: 3
+  retry_delay: 5
+EOF
 
 echo "================================================================"
 echo " Step 0: Build BasePack-v1 (for G0/G1 reproducibility baseline)"
@@ -176,17 +212,35 @@ echo ""
 echo "================================================================"
 echo " Step 5: Train SFT policy (Qwen3-1.7B + LoRA)"
 echo "================================================================"
-cd "${LLAMAFACTORY_ROOT}"
-CUDA_VISIBLE_DEVICES="${CUDA_MULTI}" llamafactory-cli train project/llamafactory_configs/qwen3_1p7b_lora_sft.yaml
-cd project
+if [ "${FORCE_SFT_TRAIN}" != "1" ] && is_sft_model_complete; then
+    echo "  Skip Step 5: policy_outputs/sft_model already exists."
+else
+    cd "${LLAMAFACTORY_ROOT}"
+    CUDA_VISIBLE_DEVICES="${CUDA_MULTI}" llamafactory-cli train project/llamafactory_configs/qwen3_1p7b_lora_sft.yaml
+    cd project
+fi
 
 echo ""
 echo "================================================================"
 echo " Step 6: Generate SFT policy hints for all splits (G2 inference)"
 echo "================================================================"
-python scripts/06_generate_policy_hints.py \
-    --policy sft \
-    --base_model "${QWEN_1P7B}"
+_pending_sft_hint_splits=()
+for split in train val test; do
+    if is_policy_hints_complete sft "${split}"; then
+        echo "  Skip Step 6 (${split}): policy_outputs/sft_hints_${split}.jsonl already complete."
+    else
+        _pending_sft_hint_splits+=("${split}")
+    fi
+done
+
+if [ ${#_pending_sft_hint_splits[@]} -gt 0 ]; then
+    python scripts/06_generate_policy_hints.py \
+        --policy sft \
+        --base_model "${QWEN_1P7B}" \
+        --splits "${_pending_sft_hint_splits[@]}"
+else
+    echo "  Skip Step 6: all splits already complete."
+fi
 
 echo ""
 echo "================================================================"
@@ -213,18 +267,14 @@ export CUDA_VISIBLE_DEVICES="${CUDA_SINGLE}"
 python scripts/04_score_candidate_hints.py \
     --split train \
     --backend api \
-    --api_base_url "${VLLM_BASE_URL}" \
-    --api_model "${VLLM_MODEL_NAME}" \
-    --api_key EMPTY \
+    --config "${VLLM_API_CONFIG_PATH}" \
     --api_workers "${VLLM_API_WORKERS}" \
     --slm_probe "${G0_PROBE}"
 
 python scripts/04_score_candidate_hints.py \
     --split val \
     --backend api \
-    --api_base_url "${VLLM_BASE_URL}" \
-    --api_model "${VLLM_MODEL_NAME}" \
-    --api_key EMPTY \
+    --config "${VLLM_API_CONFIG_PATH}" \
     --api_workers "${VLLM_API_WORKERS}" \
     --slm_probe "${G0_PROBE}"
 
@@ -255,9 +305,23 @@ echo ""
 echo "================================================================"
 echo " Step 11: Generate DPO policy hints for all splits (G3 inference)"
 echo "================================================================"
-python scripts/06_generate_policy_hints.py \
-    --policy dpo \
-    --base_model "${QWEN_1P7B}"
+_pending_dpo_hint_splits=()
+for split in train val test; do
+    if is_policy_hints_complete dpo "${split}"; then
+        echo "  Skip Step 11 (${split}): policy_outputs/dpo_hints_${split}.jsonl already complete."
+    else
+        _pending_dpo_hint_splits+=("${split}")
+    fi
+done
+
+if [ ${#_pending_dpo_hint_splits[@]} -gt 0 ]; then
+    python scripts/06_generate_policy_hints.py \
+        --policy dpo \
+        --base_model "${QWEN_1P7B}" \
+        --splits "${_pending_dpo_hint_splits[@]}"
+else
+    echo "  Skip Step 11: all splits already complete."
+fi
 
 echo ""
 echo "================================================================"
